@@ -45,6 +45,7 @@ class Settings(PluginSettings):
         "Allowed Audio Languages": "jpn,nld,eng,deu",
         "Allowed Subtitle Languages": "jpn,nld,eng,deu",
         "Skip file if no allowed audio remains": True,
+        "Preserve Matroska Attachments": False,
     }
 
     def __init__(self, *args, **kwargs):
@@ -65,6 +66,10 @@ class Settings(PluginSettings):
             "Skip file if no allowed audio remains": {
                 "label": "Skip file if no allowed audio remains",
                 "tooltip": "Recommended safety option. Prevents stripping all audio from files that do not contain any allowed language.",
+            },
+            "Preserve Matroska Attachments": {
+                "label": "Preserve Matroska attachments (fonts, cover art)",
+                "tooltip": "Disabled by default because some MKV attachment streams can make FFmpeg remux jobs fail. Enable only if you specifically need embedded fonts or cover art preserved.",
             },
         }
 
@@ -161,6 +166,7 @@ def _plan_changes(probe: dict, settings: Settings) -> Optional[dict]:
     allowed_audio = set(_parse_lang_list(settings.get_setting("Allowed Audio Languages")))
     allowed_subs = set(_parse_lang_list(settings.get_setting("Allowed Subtitle Languages")))
     skip_if_no_audio = bool(settings.get_setting("Skip file if no allowed audio remains"))
+    preserve_attachments = bool(settings.get_setting("Preserve Matroska Attachments"))
 
     video, audio, subtitle, data_streams, attachments = _extract_streams(probe)
     if not video:
@@ -211,8 +217,7 @@ def _plan_changes(probe: dict, settings: Settings) -> Optional[dict]:
         "audio": kept_audio_sorted,
         "subtitle": kept_subs_sorted,
         "data": data_streams,
-        "attachments": attachments,
-        "preferred": preferred,
+        "attachments": attachments if preserve_attachments else [],
     }
 
 

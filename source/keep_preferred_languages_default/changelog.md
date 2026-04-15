@@ -19,3 +19,8 @@
 - Reorder streams by preferred language order
 - Set default audio and subtitle tracks
 - Skip files with no allowed audio remaining
+
+
+## v0.0.4
+- Added optional preservation of Matroska attachments.
+- Default is now to skip attachments during remux to avoid FFmpeg failures on files with embedded font/attachment streams.
