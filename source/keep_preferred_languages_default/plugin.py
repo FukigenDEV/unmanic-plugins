@@ -46,6 +46,10 @@ class Settings(PluginSettings):
         "Allowed Subtitle Languages": "jpn,nld,eng,deu",
         "Skip file if no allowed audio remains": True,
         "Preserve Matroska Attachments": False,
+        "ffprobe Analyze Duration": "100000000",
+        "ffprobe Probe Size": "100000000",
+        "ffmpeg Analyze Duration": "100000000",
+        "ffmpeg Probe Size": "100000000",
     }
 
     def __init__(self, *args, **kwargs):
@@ -68,8 +72,24 @@ class Settings(PluginSettings):
                 "tooltip": "Recommended safety option. Prevents stripping all audio from files that do not contain any allowed language.",
             },
             "Preserve Matroska Attachments": {
-                "label": "Preserve Matroska attachments (fonts, cover art)",
-                "tooltip": "Disabled by default because some MKV attachment streams can make FFmpeg remux jobs fail. Enable only if you specifically need embedded fonts or cover art preserved.",
+                "label": "Preserve Matroska attachments",
+                "tooltip": "Disabled by default to avoid failures on embedded fonts/attachments in some MKV files. Turn on only if you need to preserve embedded subtitle fonts.",
+            },
+            "ffprobe Analyze Duration": {
+                "label": "ffprobe analyze duration (microseconds)",
+                "tooltip": "Increase this for files with hard-to-probe subtitle streams such as PGS. Default: 100000000.",
+            },
+            "ffprobe Probe Size": {
+                "label": "ffprobe probe size (bytes)",
+                "tooltip": "Increase this for files with hard-to-probe subtitle streams such as PGS. Default: 100000000.",
+            },
+            "ffmpeg Analyze Duration": {
+                "label": "ffmpeg analyze duration (microseconds)",
+                "tooltip": "Input probing duration for the remux step. Default: 100000000.",
+            },
+            "ffmpeg Probe Size": {
+                "label": "ffmpeg probe size (bytes)",
+                "tooltip": "Input probing size for the remux step. Default: 100000000.",
             },
         }
 
@@ -85,18 +105,32 @@ def _parse_lang_list(value: str) -> List[str]:
     if not value:
         return []
     items = []
-    for part in value.split(","):
+    for part in str(value).split(","):
         lang = _normalize_lang(part)
         if lang and lang not in items:
             items.append(lang)
     return items
 
 
-def _run_ffprobe(path: str) -> Optional[dict]:
+def _parse_positive_int(value, default: int) -> int:
+    try:
+        parsed = int(str(value).strip())
+        if parsed > 0:
+            return parsed
+    except Exception:
+        pass
+    return default
+
+
+def _run_ffprobe(path: str, analyzeduration: int, probesize: int) -> Optional[dict]:
     cmd = [
         "ffprobe",
         "-v",
         "quiet",
+        "-analyzeduration",
+        str(analyzeduration),
+        "-probesize",
+        str(probesize),
         "-print_format",
         "json",
         "-show_streams",
@@ -181,11 +215,13 @@ def _plan_changes(probe: dict, settings: Settings) -> Optional[dict]:
 
     kept_audio_sorted = _sort_kept(kept_audio_original, preferred)
     kept_subs_sorted = _sort_kept(kept_subs_original, preferred)
+    kept_attachments = attachments if preserve_attachments else []
 
     audio_removed = len(kept_audio_original) != len(audio)
     subs_removed = len(kept_subs_original) != len(subtitle)
     audio_reordered = [s["src_index"] for s in kept_audio_original] != [s["src_index"] for s in kept_audio_sorted]
     subs_reordered = [s["src_index"] for s in kept_subs_original] != [s["src_index"] for s in kept_subs_sorted]
+    attachments_removed = bool(attachments) and not preserve_attachments
 
     audio_default_pos = _current_default_position(kept_audio_original)
     subs_default_pos = _current_default_position(kept_subs_original)
@@ -207,6 +243,7 @@ def _plan_changes(probe: dict, settings: Settings) -> Optional[dict]:
         subs_reordered,
         audio_default_wrong,
         subs_default_wrong,
+        attachments_removed,
     ])
 
     if not needs_processing:
@@ -217,64 +254,59 @@ def _plan_changes(probe: dict, settings: Settings) -> Optional[dict]:
         "audio": kept_audio_sorted,
         "subtitle": kept_subs_sorted,
         "data": data_streams,
-        "attachments": attachments if preserve_attachments else [],
+        "attachments": kept_attachments,
     }
 
 
-def _build_ffmpeg_command(file_in: str, file_out: str, plan: dict) -> List[str]:
+def _build_ffmpeg_command(
+    file_in: str,
+    file_out: str,
+    plan: dict,
+    analyzeduration: int,
+    probesize: int,
+) -> List[str]:
     cmd = [
         "ffmpeg",
         "-hide_banner",
         "-loglevel",
         "warning",
-        "-y",
+        "-analyzeduration",
+        str(analyzeduration),
+        "-probesize",
+        str(probesize),
         "-i",
         file_in,
         "-map_metadata",
         "0",
         "-map_chapters",
         "0",
-        "-c",
-        "copy",
     ]
 
-    ordered_streams = []
-    ordered_streams.extend(plan["video"])
-    ordered_streams.extend(plan["audio"])
-    ordered_streams.extend(plan["subtitle"])
-    ordered_streams.extend(plan["data"])
-    ordered_streams.extend(plan["attachments"])
+    for stream in plan["video"]:
+        cmd += ["-map", f"0:{stream['src_index']}"]
+    for stream in plan["audio"]:
+        cmd += ["-map", f"0:{stream['src_index']}"]
+    for stream in plan["subtitle"]:
+        cmd += ["-map", f"0:{stream['src_index']}"]
+    for stream in plan["data"]:
+        cmd += ["-map", f"0:{stream['src_index']}"]
+    for stream in plan["attachments"]:
+        cmd += ["-map", f"0:{stream['src_index']}"]
 
-    audio_out_idx = 0
-    sub_out_idx = 0
+    cmd += ["-c", "copy", "-max_muxing_queue_size", "10240"]
 
-    for stream in ordered_streams:
-        src_index = stream["src_index"]
-        cmd.extend(["-map", f"0:{src_index}"])
+    for idx, stream in enumerate(plan["audio"]):
+        cmd += [
+            f"-disposition:a:{idx}",
+            _stream_disposition_string(stream, want_default=(idx == 0)),
+        ]
+    for idx, stream in enumerate(plan["subtitle"]):
+        cmd += [
+            f"-disposition:s:{idx}",
+            _stream_disposition_string(stream, want_default=(idx == 0)),
+        ]
 
-    for output_index, stream in enumerate(ordered_streams):
-        stream_type = stream["codec_type"]
-        if stream_type == "audio":
-            want_default = audio_out_idx == 0
-            audio_out_idx += 1
-            cmd.extend([
-                f"-disposition:a:{audio_out_idx - 1}",
-                _stream_disposition_string(stream, want_default),
-            ])
-        elif stream_type == "subtitle":
-            want_default = sub_out_idx == 0
-            sub_out_idx += 1
-            cmd.extend([
-                f"-disposition:s:{sub_out_idx - 1}",
-                _stream_disposition_string(stream, want_default),
-            ])
-        else:
-            cmd.extend([
-                f"-disposition:{output_index}",
-                _stream_disposition_string(stream, False),
-            ])
-
-    cmd.append(file_out)
+    cmd += ["-y", file_out]
     return cmd
 
 
@@ -288,7 +320,10 @@ def on_library_management_file_test(data):
     else:
         settings = Settings()
 
-    probe = _run_ffprobe(abspath)
+    ffprobe_analyzeduration = _parse_positive_int(settings.get_setting("ffprobe Analyze Duration"), 100000000)
+    ffprobe_probesize = _parse_positive_int(settings.get_setting("ffprobe Probe Size"), 100000000)
+
+    probe = _run_ffprobe(abspath, ffprobe_analyzeduration, ffprobe_probesize)
     if not probe:
         return data
 
@@ -313,7 +348,12 @@ def on_worker_process(data):
     else:
         settings = Settings()
 
-    probe = _run_ffprobe(file_in)
+    ffprobe_analyzeduration = _parse_positive_int(settings.get_setting("ffprobe Analyze Duration"), 100000000)
+    ffprobe_probesize = _parse_positive_int(settings.get_setting("ffprobe Probe Size"), 100000000)
+    ffmpeg_analyzeduration = _parse_positive_int(settings.get_setting("ffmpeg Analyze Duration"), 100000000)
+    ffmpeg_probesize = _parse_positive_int(settings.get_setting("ffmpeg Probe Size"), 100000000)
+
+    probe = _run_ffprobe(file_in, ffprobe_analyzeduration, ffprobe_probesize)
     if not probe:
         return data
 
@@ -321,6 +361,12 @@ def on_worker_process(data):
     if plan is None:
         return data
 
-    data["exec_command"] = _build_ffmpeg_command(file_in, file_out, plan)
+    data["exec_command"] = _build_ffmpeg_command(
+        file_in,
+        file_out,
+        plan,
+        ffmpeg_analyzeduration,
+        ffmpeg_probesize,
+    )
     logger.debug("Prepared ffmpeg command for '%s'.", file_in)
     return data
