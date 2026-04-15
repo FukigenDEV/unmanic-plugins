@@ -3,11 +3,11 @@ name: Unmanic Plugin Test and Generate Repo
 on:
   push:
     branches:
-      - '**'
+      - "**"
   pull_request:
     branches:
-      - 'official'
-      - 'master'
+      - "official"
+      - "master"
 
 jobs:
   # Ensure that all plugins contain the required files and that
@@ -145,28 +145,28 @@ jobs:
     permissions:
       contents: write
     steps:
-    # Fetch and read success file
-    - name: Download success file from previous job
-      uses: actions/download-artifact@v4
-      with:
-        path: ./artifacts/
-    - name: Read success file
-      id: previous_jobs_success
-      run: |
-        IS_SUCCESS=$(cat ./artifacts/success_file/success_file.txt)
-        echo "IS_SUCCESS=${IS_SUCCESS:?}" >> $GITHUB_OUTPUT
-        rm -rfv ./artifacts
+      # Fetch and read success file
+      - name: Download success file from previous job
+        uses: actions/download-artifact@v4
+        with:
+          path: ./artifacts/
+      - name: Read success file
+        id: previous_jobs_success
+        run: |
+          IS_SUCCESS=$(cat ./artifacts/success_file/success_file.txt)
+          echo "IS_SUCCESS=${IS_SUCCESS:?}" >> $GITHUB_OUTPUT
+          rm -rfv ./artifacts
 
-    # Checkout
-    - name: Checkout
-      if: steps.previous_jobs_success.outputs.IS_SUCCESS == 'true'
-      uses: actions/checkout@v4
-      with:
-        submodules: recursive
+      # Checkout
+      - name: Checkout
+        if: steps.previous_jobs_success.outputs.IS_SUCCESS == 'true'
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
-    # Execute plugin repo gen action
-    - name: Generate and Deploy Unmanic Plugin Repository
-      uses: Unmanic/action.generate-unmanic-plugin-repo@master
+      # Execute plugin repo gen action
+      - name: Generate and Deploy Unmanic Plugin Repository
+        uses: Unmanic/action.generate-unmanic-plugin-repo@master
         with:
           deploy_repo: ${{ (github.ref == 'refs/heads/master' || github.ref == 'refs/heads/official') && github.event_name != 'pull_request' && 'true' || 'false' }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
