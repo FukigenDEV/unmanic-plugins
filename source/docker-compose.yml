@@ -1,0 +1,18 @@
+services:
+  unmanic:
+    container_name: unmanic
+    image: josh5/unmanic:latest
+    ports:
+      - "8888:8888"
+    environment:
+      PUID: "3001"
+      PGID: "3001"
+      TZ: Europe/Amsterdam
+    volumes:
+      - /mnt/tank/appdata/unmanic:/config
+      - /mnt/tank/media:/library
+      - /mnt/tank/appdata/unmanic/cache:/tmp/unmanic
+    restart: unless-stopped
+    # Uncomment this only if you later add video transcoding plugins that need GPU access.
+    # devices:
+    #   - /dev/dri:/dev/dri

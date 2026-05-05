@@ -41,7 +41,11 @@ LANG_ALIASES = {
 
 class Settings(PluginSettings):
     settings = {
-        "Preferred Languages": "jpn,nld,eng,deu",
+        "Preferred Audio Languages": "nld,eng,deu,jpn",
+        "Preferred Audio Default Languages": "nld,eng,deu",
+        "Preferred Audio Default Languages for Japanese-original": "jpn,nld,eng,deu",
+        "Preferred Subtitle Languages": "nld,eng,deu,jpn",
+        "Preferred Subtitle Default Languages": "nld,eng,deu",
         "Allowed Audio Languages": "jpn,nld,eng,deu",
         "Allowed Subtitle Languages": "jpn,nld,eng,deu",
         "Skip file if no allowed audio remains": True,
@@ -55,9 +59,25 @@ class Settings(PluginSettings):
     def __init__(self, *args, **kwargs):
         super(Settings, self).__init__(*args, **kwargs)
         self.form_settings = {
-            "Preferred Languages": {
-                "label": "Preferred language order for audio and subtitles (comma separated, highest priority first)",
-                "tooltip": "Examples: jpn,nld,eng,deu or ja,nl,en,de. Two-letter and common aliases are normalized.",
+            "Preferred Audio Languages": {
+                "label": "Preferred audio order (comma separated, highest priority first)",
+                "tooltip": "Used for sorting kept audio streams. Japanese can be kept without always becoming default.",
+            },
+            "Preferred Audio Default Languages": {
+                "label": "Preferred default audio languages for normal content",
+                "tooltip": "Used to choose the default audio track when the source does not appear to be Japanese-original.",
+            },
+            "Preferred Audio Default Languages for Japanese-original": {
+                "label": "Preferred default audio languages for Japanese-original content",
+                "tooltip": "Used to choose the default audio track when the plugin infers the source is Japanese-original. Default: jpn,nld,eng,deu.",
+            },
+            "Preferred Subtitle Languages": {
+                "label": "Preferred subtitle order (comma separated, highest priority first)",
+                "tooltip": "Used for sorting kept subtitle streams. Default keeps Japanese subtitles but orders them after Dutch, English and German.",
+            },
+            "Preferred Subtitle Default Languages": {
+                "label": "Preferred default subtitle languages",
+                "tooltip": "Used to choose the default subtitle track. By default Japanese is excluded, so Japanese subtitles are kept but never made default.",
             },
             "Allowed Audio Languages": {
                 "label": "Allowed audio languages (comma separated)",
@@ -195,8 +215,42 @@ def _current_default_position(streams: List[dict]) -> Optional[int]:
     return None
 
 
+def _desired_default_src_index(streams: List[dict], preferred_default_languages: List[str]) -> Optional[int]:
+    eligible = set(preferred_default_languages)
+    for stream in streams:
+        if stream["lang"] in eligible:
+            return stream["src_index"]
+    return None
+
+
+def _default_is_wrong(original_streams: List[dict], desired_default_src_index: Optional[int]) -> bool:
+    current_defaults = [
+        stream["src_index"]
+        for stream in original_streams
+        if (stream.get("disposition") or {}).get("default")
+    ]
+    if desired_default_src_index is None:
+        return bool(current_defaults)
+    return current_defaults != [desired_default_src_index]
+
+
+def _looks_japanese_original(audio_streams: List[dict], kept_audio_streams: List[dict]) -> bool:
+    default_pos = _current_default_position(audio_streams)
+    if default_pos is not None and audio_streams[default_pos]["lang"] == "jpn":
+        return True
+    if kept_audio_streams and all(stream["lang"] == "jpn" for stream in kept_audio_streams):
+        return True
+    return False
+
+
 def _plan_changes(probe: dict, settings: Settings) -> Optional[dict]:
-    preferred = _parse_lang_list(settings.get_setting("Preferred Languages"))
+    preferred_audio = _parse_lang_list(settings.get_setting("Preferred Audio Languages"))
+    preferred_audio_default = _parse_lang_list(settings.get_setting("Preferred Audio Default Languages"))
+    preferred_audio_default_jpn_original = _parse_lang_list(
+        settings.get_setting("Preferred Audio Default Languages for Japanese-original")
+    )
+    preferred_subs = _parse_lang_list(settings.get_setting("Preferred Subtitle Languages"))
+    preferred_subs_default = _parse_lang_list(settings.get_setting("Preferred Subtitle Default Languages"))
     allowed_audio = set(_parse_lang_list(settings.get_setting("Allowed Audio Languages")))
     allowed_subs = set(_parse_lang_list(settings.get_setting("Allowed Subtitle Languages")))
     skip_if_no_audio = bool(settings.get_setting("Skip file if no allowed audio remains"))
@@ -213,28 +267,31 @@ def _plan_changes(probe: dict, settings: Settings) -> Optional[dict]:
         logger.info("Skipping file because no allowed audio track remains after filtering.")
         return None
 
-    kept_audio_sorted = _sort_kept(kept_audio_original, preferred)
-    kept_subs_sorted = _sort_kept(kept_subs_original, preferred)
+    japanese_original = _looks_japanese_original(audio, kept_audio_original)
+    active_audio_default_languages = (
+        preferred_audio_default_jpn_original if japanese_original else preferred_audio_default
+    )
+
+    kept_audio_sorted = _sort_kept(kept_audio_original, preferred_audio)
+    kept_subs_sorted = _sort_kept(kept_subs_original, preferred_subs)
     kept_attachments = attachments if preserve_attachments else []
+
+    desired_audio_default_src = _desired_default_src_index(
+        kept_audio_sorted,
+        active_audio_default_languages,
+    )
+    desired_subs_default_src = _desired_default_src_index(
+        kept_subs_sorted,
+        preferred_subs_default,
+    )
 
     audio_removed = len(kept_audio_original) != len(audio)
     subs_removed = len(kept_subs_original) != len(subtitle)
     audio_reordered = [s["src_index"] for s in kept_audio_original] != [s["src_index"] for s in kept_audio_sorted]
     subs_reordered = [s["src_index"] for s in kept_subs_original] != [s["src_index"] for s in kept_subs_sorted]
     attachments_removed = bool(attachments) and not preserve_attachments
-
-    audio_default_pos = _current_default_position(kept_audio_original)
-    subs_default_pos = _current_default_position(kept_subs_original)
-    audio_default_wrong = bool(kept_audio_sorted) and not (
-        audio_default_pos is not None
-        and kept_audio_original[audio_default_pos]["src_index"] == kept_audio_sorted[0]["src_index"]
-        and sum(1 for s in kept_audio_original if (s.get("disposition") or {}).get("default")) == 1
-    )
-    subs_default_wrong = bool(kept_subs_sorted) and not (
-        subs_default_pos is not None
-        and kept_subs_original[subs_default_pos]["src_index"] == kept_subs_sorted[0]["src_index"]
-        and sum(1 for s in kept_subs_original if (s.get("disposition") or {}).get("default")) == 1
-    )
+    audio_default_wrong = _default_is_wrong(kept_audio_original, desired_audio_default_src)
+    subs_default_wrong = _default_is_wrong(kept_subs_original, desired_subs_default_src)
 
     needs_processing = any([
         audio_removed,
@@ -255,6 +312,9 @@ def _plan_changes(probe: dict, settings: Settings) -> Optional[dict]:
         "subtitle": kept_subs_sorted,
         "data": data_streams,
         "attachments": kept_attachments,
+        "audio_default_src_index": desired_audio_default_src,
+        "subtitle_default_src_index": desired_subs_default_src,
+        "looks_japanese_original": japanese_original,
     }
 
 
@@ -295,15 +355,18 @@ def _build_ffmpeg_command(
 
     cmd += ["-c", "copy", "-max_muxing_queue_size", "10240"]
 
+    desired_audio_default_src = plan.get("audio_default_src_index")
+    desired_subtitle_default_src = plan.get("subtitle_default_src_index")
+
     for idx, stream in enumerate(plan["audio"]):
         cmd += [
             f"-disposition:a:{idx}",
-            _stream_disposition_string(stream, want_default=(idx == 0)),
+            _stream_disposition_string(stream, want_default=(stream["src_index"] == desired_audio_default_src)),
         ]
     for idx, stream in enumerate(plan["subtitle"]):
         cmd += [
             f"-disposition:s:{idx}",
-            _stream_disposition_string(stream, want_default=(idx == 0)),
+            _stream_disposition_string(stream, want_default=(stream["src_index"] == desired_subtitle_default_src)),
         ]
 
     cmd += ["-y", file_out]
@@ -330,7 +393,11 @@ def on_library_management_file_test(data):
     plan = _plan_changes(probe, settings)
     if plan is not None:
         data["add_file_to_pending_tasks"] = True
-        logger.debug("File '%s' requires preferred-language cleanup.", abspath)
+        logger.debug(
+            "File '%s' requires preferred-language cleanup (japanese_original=%s).",
+            abspath,
+            plan.get("looks_japanese_original"),
+        )
     return data
 
 
@@ -368,5 +435,9 @@ def on_worker_process(data):
         ffmpeg_analyzeduration,
         ffmpeg_probesize,
     )
-    logger.debug("Prepared ffmpeg command for '%s'.", file_in)
+    logger.debug(
+        "Prepared ffmpeg command for '%s' (japanese_original=%s).",
+        file_in,
+        plan.get("looks_japanese_original"),
+    )
     return data
